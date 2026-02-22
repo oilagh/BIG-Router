@@ -2,43 +2,81 @@
 
 import argparse, socket, time, json, select, struct, sys, math
 
-# IP/Subnetting Stuff
+# IP/SUBNET UTILITIES
+# Routers operate on binary numbers and not dotted IP strings. Need to implement:
+    # Converting IP strings to 32-bit integers
+    # Converting integers to IP strings
+    # Turning subnet masks into prefix lengths (/24, /16, etc.)
+    # Computing network addresses
+    # Checking if a destination belongs to a prefix (longest-prefix match)
 
-# convert dotted IPv4 String into 32-bit integer
+# Converts dotted IPv4 address into a 32-bit integer so we can perform bitwise routing calculations. Longest-prefix matching is implemented 
+# using bit masking, which only works on numeric representations of IP addresses.
 def ip_to_int(ip):
-    parts = ip.split(".") 
+
+    parts = ip.split(".")
     if len(parts) != 4:
         raise ValueError("Invalid IPv4 format")
 
-    value = 0; #initializing
+    value = 0
 
     for p in parts:
         octet = int(p)
         if octet < 0 or octet > 255:
             raise ValueError("Invalid IPv4 octet")
 
-        # shifting bits left 8 to accomodate new octet using bitwise OR to insert it
+        # Shift left 8 bits to make room, then insert this octet.
         value = (value << 8) | octet
 
     return value
 
+# Converts a 32-bit integer back into dotted IPv4 format. Human-readable IP strings are expected when we send routing tables 
+# or responses, but internally we store everything as integers.
+def int_to_ip(value):
+    return ".".join(str((value >> shift) & 255) for shift in (24, 16, 8, 0))
 
-
-# convert 32-bit string back into IPv4 address
-return ".".join(str((value >> shift) &225) for shift in (24, 16, 8, 0) # value >> shift moves octet to the very right and &255 isolates just that octet
-
-# convert subnet mask string into prefix length
+# Converts a subnet mask into its prefix length representation. BGP decisions compare prefix lengths numerically (e.g., /24 is
+# more specific than /16).
 def netmask_to_prefixlen(mask):
-    m = ip_to_int(mask) # convert mask to int
-    prefix = 0 # represents amount of leading 1-bits
+
+    m = ip_to_int(mask)
+
+    prefix = 0
     seen_zero = False
 
-    # bits from most to least significant
-    for i in range (31, -1, -1):
-        bit = (m >> 1) & 1
+    # Examine bits from most significant → least significant
+    for i in range(31, -1, -1):
+        bit = (m >> i) & 1
 
         if bit == 1:
-            
+            # Valid masks must be contiguous ones.
+            if seen_zero:
+                raise ValueError("Non-contiguous subnet mask")
+            prefix += 1
+        else:
+            seen_zero = True
+
+    return prefix
+
+# Convert a prefix length back into a subnet mask. Some operations (like matching or aggregation) require the mask
+# itself rather than just the prefix length.
+def prefixlen_to_mask(prefixlen):
+
+    if prefixlen == 0:
+        return 0
+
+    # Create mask with prefixlen leading 1s.
+    return (0xFFFFFFFF << (32 - prefixlen)) & 0xFFFFFFFF
+
+# computes the base network address for a prefix. BGP stores routes as networks (e.g., 192.168.1.0/24), not individual host IPs. 
+def network_address(ip_int, prefixlen):
+    mask = prefixlen_to_mask(prefixlen)
+    return ip_int & mask
+
+# Determines whether a destination IP belongs to a given network. Implements the core of LONGEST PREFIX MATCH, which is how routers decide where to forward packets.
+def prefix_match(ip_int, net_int, prefixlen):
+    mask = prefixlen_to_mask(prefixlen)
+    return (ip_int & mask) == net_int
 
 class Router:
 
