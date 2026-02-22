@@ -2,6 +2,44 @@
 
 import argparse, socket, time, json, select, struct, sys, math
 
+# IP/Subnetting Stuff
+
+# convert dotted IPv4 String into 32-bit integer
+def ip_to_int(ip):
+    parts = ip.split(".") 
+    if len(parts) != 4:
+        raise ValueError("Invalid IPv4 format")
+
+    value = 0; #initializing
+
+    for p in parts:
+        octet = int(p)
+        if octet < 0 or octet > 255:
+            raise ValueError("Invalid IPv4 octet")
+
+        # shifting bits left 8 to accomodate new octet using bitwise OR to insert it
+        value = (value << 8) | octet
+
+    return value
+
+
+
+# convert 32-bit string back into IPv4 address
+return ".".join(str((value >> shift) &225) for shift in (24, 16, 8, 0) # value >> shift moves octet to the very right and &255 isolates just that octet
+
+# convert subnet mask string into prefix length
+def netmask_to_prefixlen(mask):
+    m = ip_to_int(mask) # convert mask to int
+    prefix = 0 # represents amount of leading 1-bits
+    seen_zero = False
+
+    # bits from most to least significant
+    for i in range (31, -1, -1):
+        bit = (m >> 1) & 1
+
+        if bit == 1:
+            
+
 class Router:
 
     relations = {}
