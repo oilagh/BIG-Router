@@ -1,6 +1,6 @@
 #!/usr/bin/env -S python3 -u
 
-import argparse, socket, time, json, select, struct, sys, math
+import argparse, socket, time, json, select, struct, sys, math, RoutingTable
 
 # IP/SUBNET UTILITIES
 # Routers operate on binary numbers and not dotted IP strings. Need to implement:
@@ -83,6 +83,7 @@ class Router:
     relations = {}
     sockets = {}
     ports = {}
+    table = RoutingTable.RoutingTable()
 
     def __init__(self, asn, connections):
         print("Router at AS %s starting up" % asn)
@@ -92,9 +93,12 @@ class Router:
 
             self.sockets[neighbor] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.sockets[neighbor].bind(('localhost', 0))
+            print("Bound to port:", self.sockets[neighbor].getsockname()[1])
             self.ports[neighbor] = int(port)
             self.relations[neighbor] = relation
-            self.send(neighbor, json.dumps({ "type": "handshake", "src": self.our_addr(neighbor), "dst": neighbor, "msg": {}  }))
+            handshakeMsg = json.dumps({ "type": "handshake", "src": self.our_addr(neighbor), "dst": neighbor, "msg": {}  })
+            print(handshakeMsg)
+            self.send(neighbor, handshakeMsg)
 
     def our_addr(self, dst):
         quads = list(int(qdn) for qdn in dst.split('.'))
@@ -103,6 +107,7 @@ class Router:
 
     def send(self, network, message):
         self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
+        print("sent data to %s" % (network))
 
     def run(self):
         while True:
@@ -112,12 +117,50 @@ class Router:
                 srcif = None
                 for sock in self.sockets:
                     if self.sockets[sock] == conn:
+                        print(sock)
                         srcif = sock
                         break
                 msg = k.decode('utf-8')
 
-                print("Received message '%s' from %s" % (msg, srcif))
+                print("Received message %s from %s" % (msg, srcif))
+                self.handle_message(msg, srcif)
         return
+    
+    def handle_message(self, msg, srcif):
+        msgDict = json.loads(msg)
+        match msgDict['type']:
+            case 'handshake':
+                self.__handle_handshake(msgDict)
+            case 'update':
+                self.__handle_update(srcif, msgDict)
+            case 'withdraw':
+                self.__handle_withdraw(msgDict)
+            case 'data':
+                self.__handle_data(msgDict)
+            case _:
+                print("unknown message type")
+
+    
+    def __handle_update(self, srcif, updateMsg):
+        self.table.add_message(updateMsg)
+
+        updateMsg['msg']['ASPath'].insert(0, self.asn)
+        updateMsg['msg']['selfOrigin'] = False
+
+        for neighbor in self.sockets:
+            if neighbor == srcif:
+                continue  
+            
+            if self.relations[srcif] != 'cust' and self.relations[neighbor] != 'cust':
+                continue
+
+            fwd = {
+                "type": "update",
+                "src": self.our_addr(neighbor),
+                "dst": neighbor,
+                "msg": updateMsg['msg']
+            }
+            self.send(neighbor, json.dumps(fwd))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='route packets')
