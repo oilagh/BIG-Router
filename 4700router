@@ -7,35 +7,40 @@ from RoutingTable import RoutingTable
 class Router:
 
     def __init__(self, asn, connections):
-        self.asn       = asn
-        self.table     = RoutingTable()
-        self.sockets   = {}  
-        self.ports     = {}  
-        self.relations = {}   
+        self.asn = asn
+        self.table = RoutingTable()
+        self.sockets = {}
+        self.ports = {}
+        self.relations = {}
 
         for relationship in connections:
             port, neighbor, relation = relationship.split("-")
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.bind(('localhost', 0))
-            self.sockets[neighbor]   = sock
-            self.ports[neighbor]     = int(port)
+            sock.bind(("localhost", 0))
+            self.sockets[neighbor] = sock
+            self.ports[neighbor] = int(port)
             self.relations[neighbor] = relation
-            self.send(neighbor, json.dumps({
-                "type": "handshake",
-                "src":  self.our_addr(neighbor),
-                "dst":  neighbor,
-                "msg":  {},
-            }))
+            self.send(
+                neighbor,
+                json.dumps(
+                    {
+                        "type": "handshake",
+                        "src": self.our_addr(neighbor),
+                        "dst": neighbor,
+                        "msg": {},
+                    }
+                ),
+            )
 
     def our_addr(self, neighbor):
         """Return the router's own IP address on the port facing `neighbor`."""
-        quads    = [int(q) for q in neighbor.split('.')]
+        quads = [int(q) for q in neighbor.split(".")]
         quads[3] = 1
         return "%d.%d.%d.%d" % tuple(quads)
 
     def send(self, neighbor, message):
         self.sockets[neighbor].sendto(
-            message.encode('utf-8'), ('localhost', self.ports[neighbor])
+            message.encode("utf-8"), ("localhost", self.ports[neighbor])
         )
 
     def run(self):
@@ -44,35 +49,44 @@ class Router:
             for conn in ready:
                 data, _ = conn.recvfrom(65535)
                 srcif = next(nb for nb, s in self.sockets.items() if s is conn)
-                self.handle_message(data.decode('utf-8'), srcif)
+                self.handle_message(data.decode("utf-8"), srcif)
 
     def handle_message(self, raw, srcif):
         msg = json.loads(raw)
-        t   = msg['type']
-        if   t == 'update':    self._handle_update(msg, srcif)
-        elif t == 'withdraw':  self._handle_withdraw(msg, srcif)
-        elif t == 'data':      self._handle_data(msg, srcif)
-        elif t == 'dump':      self._handle_dump(msg, srcif)
+        t = msg["type"]
+        if t == "update":
+            self._handle_update(msg, srcif)
+        elif t == "withdraw":
+            self._handle_withdraw(msg, srcif)
+        elif t == "data":
+            self._handle_data(msg, srcif)
+        elif t == "dump":
+            self._handle_dump(msg, srcif)
 
     def _handle_update(self, updateMsg, srcif):
         self.table.add_route(updateMsg)
 
         fwd_inner = {
-            "network": updateMsg['msg']['network'],
-            "netmask": updateMsg['msg']['netmask'],
-            "ASPath":  [self.asn] + updateMsg['msg']['ASPath'],
+            "network": updateMsg["msg"]["network"],
+            "netmask": updateMsg["msg"]["netmask"],
+            "ASPath": [self.asn] + updateMsg["msg"]["ASPath"],
         }
         for nb in self.sockets:
             if nb == srcif:
                 continue
             if not self._should_forward(srcif, nb):
                 continue
-            self.send(nb, json.dumps({
-                "type": "update",
-                "src":  self.our_addr(nb),
-                "dst":  nb,
-                "msg":  fwd_inner,
-            }))
+            self.send(
+                nb,
+                json.dumps(
+                    {
+                        "type": "update",
+                        "src": self.our_addr(nb),
+                        "dst": nb,
+                        "msg": fwd_inner,
+                    }
+                ),
+            )
 
     def _handle_withdraw(self, withdrawMsg, srcif):
         self.table.remove_route(withdrawMsg)
@@ -82,41 +96,56 @@ class Router:
                 continue
             if not self._should_forward(srcif, nb):
                 continue
-            self.send(nb, json.dumps({
-                "type": "withdraw",
-                "src":  self.our_addr(nb),
-                "dst":  nb,
-                "msg":  withdrawMsg['msg'],
-            }))
+            self.send(
+                nb,
+                json.dumps(
+                    {
+                        "type": "withdraw",
+                        "src": self.our_addr(nb),
+                        "dst": nb,
+                        "msg": withdrawMsg["msg"],
+                    }
+                ),
+            )
 
     def _handle_data(self, dataMsg, srcif):
-        route = self.table.lookup(dataMsg['dst'])
+        route = self.table.lookup(dataMsg["dst"])
 
         if route is None:
-            self._send_no_route(srcif, dataMsg['src'])
+            self._send_no_route(srcif, dataMsg["src"])
             return
 
-        if self.relations[srcif] != 'cust' and self.relations[route.peer] != 'cust':
-            self._send_no_route(srcif, dataMsg['src'])
+        if self.relations[srcif] != "cust" and self.relations[route.peer] != "cust":
+            self._send_no_route(srcif, dataMsg["src"])
             return
 
         self.send(route.peer, json.dumps(dataMsg))
 
     def _send_no_route(self, srcif, original_src):
-        self.send(srcif, json.dumps({
-            "type": "no route",
-            "src":  self.our_addr(srcif),
-            "dst":  original_src,
-            "msg":  {},
-        }))
+        self.send(
+            srcif,
+            json.dumps(
+                {
+                    "type": "no route",
+                    "src": self.our_addr(srcif),
+                    "dst": original_src,
+                    "msg": {},
+                }
+            ),
+        )
 
     def _handle_dump(self, _, srcif):
-        self.send(srcif, json.dumps({
-            "type": "table",
-            "src":  self.our_addr(srcif),
-            "dst":  srcif,
-            "msg":  self.table.dump(),
-        }))
+        self.send(
+            srcif,
+            json.dumps(
+                {
+                    "type": "table",
+                    "src": self.our_addr(srcif),
+                    "dst": srcif,
+                    "msg": self.table.dump(),
+                }
+            ),
+        )
 
     def _should_forward(self, src_nb, dst_nb):
         """
@@ -124,12 +153,15 @@ class Router:
         Rule: updates from a customer go to everyone;
               updates from a peer/provider go only to customers.
         """
-        return self.relations[src_nb] == 'cust' or self.relations[dst_nb] == 'cust'
+        return self.relations[src_nb] == "cust" or self.relations[dst_nb] == "cust"
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='BGP router')
-    parser.add_argument('asn',         type=int, help="AS number of this router")
-    parser.add_argument('connections', type=str, nargs='+', help="port-ip-relation triples")
-    args   = parser.parse_args()
+    parser = argparse.ArgumentParser(description="BGP router")
+    parser.add_argument("asn", type=int, help="AS number of this router")
+    parser.add_argument(
+        "connections", type=str, nargs="+", help="port-ip-relation triples"
+    )
+    args = parser.parse_args()
     router = Router(args.asn, args.connections)
     router.run()
