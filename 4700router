@@ -1,171 +1,135 @@
 #!/usr/bin/env -S python3 -u
 
-import argparse, socket, time, json, select, struct, sys, math, RoutingTable
+import argparse, socket, json, select
+from RoutingTable import RoutingTable
 
-# IP/SUBNET UTILITIES
-# Routers operate on binary numbers and not dotted IP strings. Need to implement:
-    # Converting IP strings to 32-bit integers
-    # Converting integers to IP strings
-    # Turning subnet masks into prefix lengths (/24, /16, etc.)
-    # Computing network addresses
-    # Checking if a destination belongs to a prefix (longest-prefix match)
-
-# Converts dotted IPv4 address into a 32-bit integer so we can perform bitwise routing calculations. Longest-prefix matching is implemented 
-# using bit masking, which only works on numeric representations of IP addresses.
-def ip_to_int(ip):
-
-    parts = ip.split(".")
-    if len(parts) != 4:
-        raise ValueError("Invalid IPv4 format")
-
-    value = 0
-
-    for p in parts:
-        octet = int(p)
-        if octet < 0 or octet > 255:
-            raise ValueError("Invalid IPv4 octet")
-
-        # Shift left 8 bits to make room, then insert this octet.
-        value = (value << 8) | octet
-
-    return value
-
-# Converts a 32-bit integer back into dotted IPv4 format. Human-readable IP strings are expected when we send routing tables 
-# or responses, but internally we store everything as integers.
-def int_to_ip(value):
-    return ".".join(str((value >> shift) & 255) for shift in (24, 16, 8, 0))
-
-# Converts a subnet mask into its prefix length representation. BGP decisions compare prefix lengths numerically (e.g., /24 is
-# more specific than /16).
-def netmask_to_prefixlen(mask):
-
-    m = ip_to_int(mask)
-
-    prefix = 0
-    seen_zero = False
-
-    # Examine bits from most significant → least significant
-    for i in range(31, -1, -1):
-        bit = (m >> i) & 1
-
-        if bit == 1:
-            # Valid masks must be contiguous ones.
-            if seen_zero:
-                raise ValueError("Non-contiguous subnet mask")
-            prefix += 1
-        else:
-            seen_zero = True
-
-    return prefix
-
-# Convert a prefix length back into a subnet mask. Some operations (like matching or aggregation) require the mask
-# itself rather than just the prefix length.
-def prefixlen_to_mask(prefixlen):
-
-    if prefixlen == 0:
-        return 0
- 
-    # Create mask with prefixlen leading 1s.
-    return (0xFFFFFFFF << (32 - prefixlen)) & 0xFFFFFFFF
-
-# computes the base network address for a prefix. BGP stores routes as networks (e.g., 192.168.1.0/24), not individual host IPs. 
-def network_address(ip_int, prefixlen):
-    mask = prefixlen_to_mask(prefixlen)
-    return ip_int & mask
-
-# Determines whether a destination IP belongs to a given network. Implements the core of LONGEST PREFIX MATCH, which is how routers decide where to forward packets.
-def prefix_match(ip_int, net_int, prefixlen):
-    mask = prefixlen_to_mask(prefixlen)
-    return (ip_int & mask) == net_int
 
 class Router:
 
-    relations = {}
-    sockets = {}
-    ports = {}
-    table = RoutingTable.RoutingTable()
-
     def __init__(self, asn, connections):
-        print("Router at AS %s starting up" % asn)
-        self.asn = asn
+        self.asn       = asn
+        self.table     = RoutingTable()
+        self.sockets   = {}  
+        self.ports     = {}  
+        self.relations = {}   
+
         for relationship in connections:
             port, neighbor, relation = relationship.split("-")
-
-            self.sockets[neighbor] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.sockets[neighbor].bind(('localhost', 0))
-            print("Bound to port:", self.sockets[neighbor].getsockname()[1])
-            self.ports[neighbor] = int(port)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.bind(('localhost', 0))
+            self.sockets[neighbor]   = sock
+            self.ports[neighbor]     = int(port)
             self.relations[neighbor] = relation
-            handshakeMsg = json.dumps({ "type": "handshake", "src": self.our_addr(neighbor), "dst": neighbor, "msg": {}  })
-            print(handshakeMsg)
-            self.send(neighbor, handshakeMsg)
+            self.send(neighbor, json.dumps({
+                "type": "handshake",
+                "src":  self.our_addr(neighbor),
+                "dst":  neighbor,
+                "msg":  {},
+            }))
 
-    def our_addr(self, dst):
-        quads = list(int(qdn) for qdn in dst.split('.'))
+    def our_addr(self, neighbor):
+        """Return the router's own IP address on the port facing `neighbor`."""
+        quads    = [int(q) for q in neighbor.split('.')]
         quads[3] = 1
-        return "%d.%d.%d.%d" % (quads[0], quads[1], quads[2], quads[3])
+        return "%d.%d.%d.%d" % tuple(quads)
 
-    def send(self, network, message):
-        self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
-        print("sent data to %s" % (network))
+    def send(self, neighbor, message):
+        self.sockets[neighbor].sendto(
+            message.encode('utf-8'), ('localhost', self.ports[neighbor])
+        )
 
     def run(self):
         while True:
-            socks = select.select(self.sockets.values(), [], [], 0.1)[0]
-            for conn in socks:
-                k, addr = conn.recvfrom(65535)
-                srcif = None
-                for sock in self.sockets:
-                    if self.sockets[sock] == conn:
-                        print(sock)
-                        srcif = sock
-                        break
-                msg = k.decode('utf-8')
+            ready, _, _ = select.select(self.sockets.values(), [], [], 0.1)
+            for conn in ready:
+                data, _ = conn.recvfrom(65535)
+                srcif = next(nb for nb, s in self.sockets.items() if s is conn)
+                self.handle_message(data.decode('utf-8'), srcif)
 
-                print("Received message %s from %s" % (msg, srcif))
-                self.handle_message(msg, srcif)
-        return
-    
-    def handle_message(self, msg, srcif):
-        msgDict = json.loads(msg)
-        match msgDict['type']:
-            case 'handshake':
-                self.__handle_handshake(msgDict)
-            case 'update':
-                self.__handle_update(srcif, msgDict)
-            case 'withdraw':
-                self.__handle_withdraw(msgDict)
-            case 'data':
-                self.__handle_data(msgDict)
-            case _:
-                print("unknown message type")
+    def handle_message(self, raw, srcif):
+        msg = json.loads(raw)
+        t   = msg['type']
+        if   t == 'update':    self._handle_update(msg, srcif)
+        elif t == 'withdraw':  self._handle_withdraw(msg, srcif)
+        elif t == 'data':      self._handle_data(msg, srcif)
+        elif t == 'dump':      self._handle_dump(msg, srcif)
 
-    
-    def __handle_update(self, srcif, updateMsg):
-        self.table.add_message(updateMsg)
+    def _handle_update(self, updateMsg, srcif):
+        self.table.add_route(updateMsg)
 
-        updateMsg['msg']['ASPath'].insert(0, self.asn)
-        updateMsg['msg']['selfOrigin'] = False
-
-        for neighbor in self.sockets:
-            if neighbor == srcif:
-                continue  
-            
-            if self.relations[srcif] != 'cust' and self.relations[neighbor] != 'cust':
+        fwd_inner = {
+            "network": updateMsg['msg']['network'],
+            "netmask": updateMsg['msg']['netmask'],
+            "ASPath":  [self.asn] + updateMsg['msg']['ASPath'],
+        }
+        for nb in self.sockets:
+            if nb == srcif:
                 continue
-
-            fwd = {
+            if not self._should_forward(srcif, nb):
+                continue
+            self.send(nb, json.dumps({
                 "type": "update",
-                "src": self.our_addr(neighbor),
-                "dst": neighbor,
-                "msg": updateMsg['msg']
-            }
-            self.send(neighbor, json.dumps(fwd))
+                "src":  self.our_addr(nb),
+                "dst":  nb,
+                "msg":  fwd_inner,
+            }))
+
+    def _handle_withdraw(self, withdrawMsg, srcif):
+        self.table.remove_route(withdrawMsg)
+
+        for nb in self.sockets:
+            if nb == srcif:
+                continue
+            if not self._should_forward(srcif, nb):
+                continue
+            self.send(nb, json.dumps({
+                "type": "withdraw",
+                "src":  self.our_addr(nb),
+                "dst":  nb,
+                "msg":  withdrawMsg['msg'],
+            }))
+
+    def _handle_data(self, dataMsg, srcif):
+        route = self.table.lookup(dataMsg['dst'])
+
+        if route is None:
+            self._send_no_route(srcif, dataMsg['src'])
+            return
+
+        if self.relations[srcif] != 'cust' and self.relations[route.peer] != 'cust':
+            self._send_no_route(srcif, dataMsg['src'])
+            return
+
+        self.send(route.peer, json.dumps(dataMsg))
+
+    def _send_no_route(self, srcif, original_src):
+        self.send(srcif, json.dumps({
+            "type": "no route",
+            "src":  self.our_addr(srcif),
+            "dst":  original_src,
+            "msg":  {},
+        }))
+
+    def _handle_dump(self, _, srcif):
+        self.send(srcif, json.dumps({
+            "type": "table",
+            "src":  self.our_addr(srcif),
+            "dst":  srcif,
+            "msg":  self.table.dump(),
+        }))
+
+    def _should_forward(self, src_nb, dst_nb):
+        """
+        Return True if an announcement received from src_nb may be sent to dst_nb.
+        Rule: updates from a customer go to everyone;
+              updates from a peer/provider go only to customers.
+        """
+        return self.relations[src_nb] == 'cust' or self.relations[dst_nb] == 'cust'
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='route packets')
-    parser.add_argument('asn', type=int, help="AS number of this router")
-    parser.add_argument('connections', metavar='connections', type=str, nargs='+', help="connections")
-    args = parser.parse_args()
+    parser = argparse.ArgumentParser(description='BGP router')
+    parser.add_argument('asn',         type=int, help="AS number of this router")
+    parser.add_argument('connections', type=str, nargs='+', help="port-ip-relation triples")
+    args   = parser.parse_args()
     router = Router(args.asn, args.connections)
     router.run()
